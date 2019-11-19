@@ -1,0 +1,113 @@
+---
+title: "Main RMD"
+author: "Ariel Karlinsky"
+date: "11/18/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.align="center")
+```
+
+Loading needed packages and setting the plot theme:
+```{r echo=T, message=FALSE, warning=FALSE, results='hide'}
+library(tidyverse)
+library(scales)
+library(WDI)
+library(pwt9)
+library(readxl)
+library(plotly)
+library(ggpmisc)
+
+ggplottheme <- ggpubr::theme_classic2() + 
+    theme(
+          panel.background = element_rect(fill = "transparent",colour = NA),
+          plot.background = element_rect(fill = "transparent",colour = NA),
+          plot.title = element_text(hjust = 1),
+          plot.subtitle = element_text(hjust = 1),
+          plot.caption = element_text(hjust = 1),
+          axis.ticks = element_blank(),
+          strip.background = element_blank(),
+          panel.spacing = unit(2, "lines")
+    )
+theme_set(ggplottheme)
+
+```
+
+Download the data from the CBS:
+
+```{r}
+download.file(url = "https://www.cbs.gov.il/he/mediarelease/doclib/2019/347/27_19_347t1.xls",
+              destfile = "cbs_accidents.xls",
+              mode = "wb")
+```
+
+Load the data to R:
+```{r}
+cbs_accidents <-read_excel(path = "cbs_accidents.xls",
+                           col_names = c("year","fatalities","drop")
+                           )%>%
+  select(-drop) %>%
+  mutate_all(as.numeric) %>%
+  filter(!is.na(fatalities), !is.na(year))
+```
+
+Load world bank data and PWT data on population in Israel:
+```{r}
+israel_pop1 <- WDI(country = "IL", indicator = c(pop = "SP.POP.TOTL"))
+
+data("pwt9.1")
+
+israel_pop2 <- pwt9.1 %>%
+  filter(country == "Israel") %>%
+  select(country, year, pop) %>%
+  mutate(pop = pop * 10^6)
+
+israel_pop <- full_join(israel_pop1, israel_pop2, by="year") %>%
+  mutate(pop = if_else(!is.na(pop.x), pop.x, pop.y))
+```
+
+Merge to create rate for 100,000, then reshape to easily plot both:
+```{r}
+merged <- left_join(cbs_accidents, israel_pop, by="year") %>%
+  mutate(rate = (fatalities/pop) * 10^5) %>%
+  pivot_longer(cols = c("fatalities", "rate"), names_to = "type", values_to = "value") %>%
+  mutate(type = factor(type, 
+                       labels =  c("הרוגים",
+                                   "שיעור הרוגים ל-100 אלף איש"))
+        ) %>%
+  group_by(type) %>%
+  mutate(max = max(value, na.rm=TRUE), min = min(value, na.rm=TRUE))
+```
+
+Plot absolute and rate of fatalities: 
+```{r message=FALSE, warning=FALSE}
+
+plot <- merged %>%
+  ggplot(aes(x=year, y=value, color=type)) +
+  geom_line(size = 1) +
+  geom_hline(aes(yintercept = max), color="grey50", linetype="dashed") +
+  geom_hline(aes(yintercept = min), color="grey50", linetype="dashed") +
+  scale_y_continuous(breaks = pretty_breaks(n = 10)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 10)) +
+  scale_color_manual(values = c("dodgerblue1","firebrick1"),
+                     guide = FALSE) +
+  facet_wrap(~type, scales = "free") +
+  labs(x = "שנה",
+       y = "",
+       title = "תאונות דרכים בישראל",
+       subtitle = "1949 - 2018",
+       caption = "מקור: נתוני הלשכה המרכזית לסטטיסטיקה")
+
+plot
+
+ggsave(filename = "accidents_plot.png", width = 7, dpi=300)
+
+```
+
+Plot.ly for interactive chart:
+```{r message=FALSE, warning=FALSE}
+plotly<-ggplotly(plot, tooltip = c("x","y"))
+hide_legend(plotly)
+```
