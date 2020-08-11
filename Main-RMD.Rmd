@@ -1,0 +1,269 @@
+---
+title: "Accidents in Israel"
+author: "Ariel Karlinsky"
+date: "11/08/2020"
+output: 
+  html_document: 
+    theme: cerulean
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.align="center")
+```
+# Preface
+
+This document downloads data on:
+
+- Fatalities in traffic accidents in Israel from 1949 to 2019
+- Total KM traveled in Israel in selected years (according to data availability)
+- Total number of vehicles in Israel
+
+and merges it with publicly available data on the Israeli population from the World Bank and the Penn World Tables. 
+
+The results are plots which show:
+
+- Fatalities from traffic accidents in Israel
+- Rate of fatalities from traffic accidents in Israel (per 100,000 people)
+- Rate of fatalities from traffic accidents in Israel (per 1,000,000,000 KM traveled)
+- Rate of fatalities from traffic accidents in Israel (per 100,000 KM vehicles)
+
+
+# Loading and wrangling data
+
+Loading needed packages and setting the plot theme:
+```{r echo=T, message=FALSE, warning=FALSE, results='hide'}
+pacman::p_load(tidyverse, scales, WDI, pwt9, readxl, plotly, ggpmisc, patchwork)
+
+ggplottheme <- ggpubr::theme_classic2() + 
+    theme(
+          panel.background = element_rect(fill = "transparent",colour = NA),
+          plot.background = element_rect(fill = "transparent",colour = NA),
+          plot.title = element_text(hjust = 1),
+          plot.subtitle = element_text(hjust = 1),
+          plot.caption = element_text(hjust = 1),
+          axis.ticks = element_blank(),
+          strip.background = element_blank(),
+          panel.spacing = unit(2, "lines")
+    )
+theme_set(ggplottheme)
+
+```
+
+Download the data from the CBS:
+
+```{r}
+download.file(url = "https://www.cbs.gov.il/he/mediarelease/doclib/2019/347/27_19_347t1.xls",
+              destfile = "cbs_accidents.xls",
+              mode = "wb")
+
+download.file(url = "https://www.cbs.gov.il/he/publications/doclib/2019/1772/t01.xls",
+              destfile = "cbs_km.xls",
+              mode = "wb")
+
+download.file(url = "https://www.cbs.gov.il/he/publications/doclib/2019/1762/t01.xls",
+              destfile = "cbs_vehicles.xls",
+              mode = "wb")
+```
+
+Load the data to R, with some wrangling to transform from human-readable to machine-readable:
+```{r}
+cbs_accidents <-read_excel(path = "cbs_accidents.xls",
+                           col_names = c("year","fatalities","drop")
+                           )%>%
+  select(-drop) %>%
+  mutate_all(as.numeric) %>%
+  filter(!is.na(fatalities), !is.na(year))
+
+cbs_km <- tibble(year = c(1975,1995,2000,2010:2018),
+                 km_total = c(9232, 30633, 36482, 49870, 50576, 50107, 51207, 52400, 54820, 57220, 59602, 61196),
+                 km_avg_percar = c(NA, 21.6, 20.5, 19.9, 19.1, 18.2, 18.1, 17.9, 17.9, 17.9, 17.7, 17.5)) 
+
+cbs_vehicles <- read_excel(path = "cbs_vehicles.xls",
+                           skip = 7) %>%
+  rename(year = ...12, vehicles = total) %>%
+  select(year, vehicles) %>%
+  filter(!is.na(year)) %>%
+  mutate(year2 = if_else(str_length(year) == 4, as.double(year), NA_real_),
+         year2 = if_else(is.na(year2), lag(year2) -1, year2)) %>%
+  select(-year, year = year2, vehicles) %>%
+  filter(!is.na(vehicles), vehicles != 100, !is.na(year)) %>%
+  mutate(vehicles = as.integer(vehicles))
+```
+
+Manually update fatalities with data for 2019 (https://www.cbs.gov.il/he/mediarelease/DocLib/2020/151/27_20_151b.pdf):
+```{r}
+cbs_accidents <- cbs_accidents %>%
+  add_row(year = 2019, fatalities = 355)
+```
+
+Estimate KM traveled for 2019 (updated data not available as of today):
+```{r}
+km_fit <- lm(data = cbs_km %>% filter(year >= 2010),
+             formula = km_total ~ year)
+
+modelsummary::modelsummary(km_fit)
+
+cbs_km <- cbs_km %>%
+  add_row(year = 2019)
+
+cbs_km$km_total_pred <- predict(km_fit, cbs_km)
+
+cbs_km <- cbs_km %>% 
+  mutate(km_total = if_else(year == 2019, round(km_total_pred), km_total ))
+```
+
+Manually update vehicles data for 2019 (https://www.cbs.gov.il/he/mediarelease/Pages/2020/כלי-רכב-מנועיים-בישראל-בשנת-2019.aspx):
+```{r}
+cbs_vehicles <- cbs_vehicles %>%
+  add_row(year = 2019, vehicles = 3600600)
+```
+
+Load world bank data and PWT data on population in Israel:
+```{r}
+israel_pop1 <- WDI(country = "IL", indicator = c(pop = "SP.POP.TOTL"))
+
+data("pwt9.1")
+
+israel_pop2 <- pwt9.1 %>%
+  filter(country == "Israel") %>%
+  select(country, year, pop) %>%
+  mutate(pop = pop * 10^6)
+
+israel_pop <- full_join(israel_pop1, israel_pop2, by="year") %>%
+  mutate(pop = if_else(!is.na(pop.x), pop.x, pop.y))
+```
+
+Merge to create rates then reshape to easily plot all variations:
+```{r}
+merged <- left_join(cbs_accidents, israel_pop, by="year") %>%
+    left_join(cbs_km, by="year") %>%
+  left_join(cbs_vehicles, by = "year") %>%
+  mutate(rate = (fatalities/pop) * 10^5, 
+         rate_1bkm = (fatalities/km_total) * 10^3,
+         rate_100kcars = (fatalities/vehicles) * 10^5) %>%
+  pivot_longer(cols = c("fatalities", "rate", "rate_1bkm", "rate_100kcars"), 
+               names_to = "type", values_to = "value") %>%
+  mutate(type = factor(type, 
+                       levels = c("fatalities", "rate", "rate_1bkm", "rate_100kcars"),
+                       labels =  c("הרוגים",
+                                   "שיעור הרוגים ל-100 אלף איש",
+                                   "הרוגים למיליארד קילומטר נסועה",
+                                   "הרוגים ל-100 אלף כלי רכב"))
+        ) %>%
+  group_by(type) %>%
+  mutate(max = max(value, na.rm=TRUE), min = min(value, na.rm=TRUE)) 
+```
+
+
+# Plotting
+
+Plot absolute and rate of fatalities: 
+```{r message=FALSE, warning=FALSE}
+
+plot1 <- merged %>%
+  filter(type %in% c("הרוגים",
+                                   "שיעור הרוגים ל-100 אלף איש")) %>%
+  ggplot(aes(x=year, y=value, color=type)) +
+  geom_line(size = 1) +
+  geom_hline(aes(yintercept = max), color="grey50", linetype="dashed") +
+  geom_hline(aes(yintercept = min), color="grey50", linetype="dashed") +
+  scale_y_continuous(breaks = pretty_breaks(n = 10)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 10)) +
+  scale_color_manual(values = c("dodgerblue1","firebrick1"),
+                     guide = FALSE) +
+  facet_wrap(~type, scales = "free") +
+  labs(x = "שנה",
+       y = "",
+       title = "תאונות דרכים בישראל: 2019-1949",
+       subtitle = "קווים אופקיים מציגים את המקסימום והמינימום",
+       caption = "מקור: נתוני הלשכה המרכזית לסטטיסטיקה")
+
+plot1
+
+ggsave(filename = "accidents_plot.png", width = 7)
+
+```
+
+Plot.ly for interactive chart:
+
+```{r message=FALSE, warning=FALSE}
+plotly<-ggplotly(plot1, tooltip = c("x","y"))
+hide_legend(plotly)
+```
+
+Plotting per KM traveled:
+
+```{r}
+plot2 <- merged %>%
+  filter(type == "הרוגים למיליארד קילומטר נסועה",
+         !is.na(value)) %>%
+  ggplot(aes(x=factor(year), y=value)) +
+  geom_hline(aes(yintercept = max), color="grey50", linetype="dashed") +
+  geom_hline(aes(yintercept = min), color="grey50", linetype="dashed") +
+  geom_col(color = "dodgerblue1", fill="dodgerblue1", width = 0.8) +
+  geom_label(aes(label = round(value, digits = 2)), color="dodgerblue1") +
+  scale_y_continuous(breaks = pretty_breaks(n = 10), 
+                     expand = expansion(mult = c(0, 0.1))) +
+  labs(x = "שנה",
+       y = "",
+       title = "הרוגים למיליארד קילומטר נסועה בישראל: שנים נבחרות",
+       subtitle = paste0("בשנת 2019 הנסועה נאמדה על בסיס הנסועה בין 2010 ל-2018", 
+                        "\n",
+                        "קווים אופקיים מציגים את המקסימום והמינימום"),
+       caption = "מקור: נתוני הלשכה המרכזית לסטטיסטיקה")
+
+plot2
+
+ggsave(filename = "deaths_per1Bkm.png", width = 7)
+
+```
+
+Plotting per cars:
+
+```{r}
+plot3 <- merged %>%
+  filter(type == "הרוגים ל-100 אלף כלי רכב",
+         !is.na(value)) %>%
+  ggplot(aes(x=year, y=value)) +
+    geom_hline(aes(yintercept = max), color="grey50", linetype="dashed") +
+  geom_hline(aes(yintercept = min), color="grey50", linetype="dashed") +
+  geom_line(color = "dodgerblue1", size = 1) +
+  scale_y_continuous(breaks = pretty_breaks(n = 10)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 10)) +
+  labs(x = "שנה",
+       y = "",
+       title = "הרוגים ל-100 אלף כלי רכב בישראל: 2019-1965",
+       subtitle = "קווים אופקיים מציגים את המקסימום והמינימום",
+       caption = "מקור: נתוני הלשכה המרכזית לסטטיסטיקה")
+
+plot3
+
+ggsave(filename = "deaths_per1Kvehicles.png", width = 7)
+
+```
+
+Plotting per cars (focus on data from 1990):
+```{r}
+plot4 <- merged %>%
+  filter(type == "הרוגים ל-100 אלף כלי רכב",
+         !is.na(value),
+         year >= 1990) %>%
+  ggplot(aes(x=year, y=value)) +
+  geom_line(color = "dodgerblue1", size = 1) +
+  scale_y_continuous(breaks = pretty_breaks(n = 10)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 10)) +
+  labs(x = "שנה",
+       y = "",
+       title = "הרוגים ל-100 אלף כלי רכב בישראל: 2019-1990",
+       subtitle = "",
+       caption = "מקור: נתוני הלשכה המרכזית לסטטיסטיקה")
+
+plot4
+
+ggsave(filename = "deaths_per1Kvehicles_from1990.png", width = 7)
+
+```
+
